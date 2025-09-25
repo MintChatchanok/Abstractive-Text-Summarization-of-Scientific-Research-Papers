@@ -1,0 +1,899 @@
+# Data Cleaning
+data = data.drop(columns=['Unnamed: 0', 'Id', 'title', 'link', 'year', 'authors', 'citations'], errors='ignore') # Drop the irrelevant columns
+
+# Replace 'cleaned_dataset.csv'
+data.to_csv('cleaned_dataset.csv', index=False)
+
+# Display the cleaned text
+print(data.head())
+
+column_names = ['abstract','Unnamed:', '0', 'Id', 'title', 'link', 'year', 'authors', 'citations']
+data = pd.read_csv(file_path, encoding='latin1', header=0)
+
+print(data.columns)
+
+def clean_text(text):
+    if isinstance(text, str):
+        text = text.lower()
+        text = re.sub(r"http\S+|www\S+|https\S+", '', text)  # Remove URLs
+        text = re.sub(r"\W+|\d+", ' ', text)  # Remove non-word characters and numbers
+        return text
+    return ""  # Return an empty string for non-string values (e.g., NaN)
+
+data['cleaned_text'] = data['abstract'].apply(clean_text)
+print(data[['abstract', 'cleaned_text']].head())
+
+# Data Tokenization, Stopword Removal, and Lemmatization
+def clean_text(text):
+    if pd.isna(text):
+        return ""
+    text = str(text)
+    print("Original:", text)  # Print the original text
+    tokens = word_tokenize(text.lower())
+    print("Tokens:", tokens)  # Print tokens after tokenization
+    stop_words = set(stopwords.words('english'))
+    filtered_tokens = [word for word in tokens if word not in stop_words]
+    print("Filtered Tokens:", filtered_tokens)  # Print tokens after stopword removal
+    lemmatizer = WordNetLemmatizer()
+    lemmatized_tokens = [lemmatizer.lemmatize(word) for word in filtered_tokens]
+    print("Lemmatized Tokens:", lemmatized_tokens)  # Print tokens after lemmatization
+    cleaned_text = ' '.join(lemmatized_tokens)
+    print("Cleaned Text:", cleaned_text)  # Print the final cleaned text
+    return cleaned_text
+
+data['cleaned_text'] = data['abstract'].apply(clean_text)
+
+# Print a sample of the DataFrame
+print(data[['abstract', 'cleaned_text']].head())
+
+# Save to CSV
+data.to_csv('cleaned_data.csv', index=False)
+
+# Dependency Parsing
+import spacy
+
+# Load the English NLP model
+nlp = spacy.load("en_core_web_sm")
+
+# Sample text
+sample_text = "IEEE_database.csv"
+
+# Process text
+doc = nlp(sample_text)
+
+# Print dependencies for each token
+for token in doc:
+    print(f"{token.text:<15} | {token.dep_:<10} | {token.head.text:<15} | {token.pos_}")
+
+# Function to extract dependencies
+def extract_dependencies(text):
+    doc = nlp(text)
+    dependencies = [(token.text, token.dep_, token.head.text, token.pos_) for token in doc]
+    return dependencies
+
+# Apply to dataset
+data["dependencies"] = data["cleaned_text"].apply(extract_dependencies)
+
+# Display sample
+print(data[["cleaned_text", "dependencies"]].head())
+
+# Named entity recognition (NER)
+# Convert back to pandas DataFrame
+data = pd.DataFrame(data["cleaned_text"])
+
+# Load the spaCy model
+nlp = spacy.load("en_core_web_sm")
+
+def apply_ner(text):
+    doc = nlp(text)
+    processed_text = []
+    for ent in doc.ents:
+        processed_text.append(f"[{ent.text} ({ent.label_})]")
+    non_entities = [token.text for token in doc if not token.ent_type_]
+    processed_text.extend(non_entities)
+    return " ".join(processed_text)
+
+data["processed_text"] = data["cleaned_text"].apply(apply_ner)
+
+print(data[["cleaned_text", "processed_text"]].head())
+
+# POS Tagging
+from nltk.tag import pos_tag
+
+nltk.download('averaged_perceptron_tagger_eng') # Download the english model
+
+# Function to apply POS tagging
+def pos_tag_text(text):
+    tokens = nltk.word_tokenize(text)
+    return nltk.pos_tag(tokens) # Explicitly call nltk.pos_tag
+
+# Apply to the dataset
+data["pos_tags"] = data["cleaned_text"].astype(str).apply(pos_tag_text)
+
+# Display sample output
+print(data[["cleaned_text", "pos_tags"]].head())
+
+# Text Vectorization: TF-IDF and Bigrams
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+
+def vectorize_text(texts):
+    # TF-IDF with 2-grams
+    tfidf_vectorizer = TfidfVectorizer(ngram_range=(1, 2))
+    tfidf = tfidf_vectorizer.fit_transform(texts)
+    return tfidf
+
+texts = data["cleaned_text"]
+tfidf = vectorize_text(texts)
+
+print(tfidf)
+
+# Word Embedding: FastText
+from gensim.models import FastText
+import nltk
+import numpy as np
+import pandas as pd
+import os
+from tqdm.auto import tqdm
+
+nltk.download('punkt', quiet=True)
+
+def train_fasttext_model(texts, model_path="fasttext_model.model", vector_size=100, force_train=False):
+    """
+    Train a FastText model on the given texts or load existing model
+
+    Parameters:
+    - texts: List of text documents
+    - model_path: Path to save/load the model
+    - vector_size: Size of word vectors
+    - force_train: Whether to train a new model even if one exists at model_path
+
+    Returns:
+    - Trained FastText model
+    """
+    if os.path.exists(model_path) and not force_train:
+        print(f"Loading existing FastText model from {model_path}")
+        return FastText.load(model_path)
+
+    print("Training new FastText model...")
+    # Ensure texts are strings
+    texts = [str(text) for text in texts]
+
+    # Tokenize each text into words
+    tokenized_sentences = [nltk.word_tokenize(text.lower()) for text in tqdm(texts)]
+
+    # Train FastText model with progress output
+    model_ft = FastText(
+        sentences=tokenized_sentences,
+        vector_size=vector_size,
+        window=5,
+        min_count=1,
+        sg=1,  # Skip-gram (1) vs CBOW (0)
+        word_ngrams=1
+    )
+
+    # Save the model
+    model_ft.save(model_path)
+    print(f"FastText model saved to {model_path}")
+
+    return model_ft
+
+def get_word_vector(word, model):
+    """Get vector for a single word"""
+    if word in model.wv:
+        return model.wv[word]
+    else:
+        return model.wv[word]
+
+def get_fasttext_sentence_vector(sentence, model):
+    """
+    Calculate sentence vector by averaging word vectors from FastText
+    This works even for words not seen during training due to FastText's subword approach
+    """
+    # Tokenize and convert to lowercase
+    words = nltk.word_tokenize(str(sentence).lower())
+
+    # Get vectors for all words
+    word_vectors = [model.wv[word] for word in words]
+
+    if len(word_vectors) == 0:
+        # Return zero vector if no words in sentence
+        return np.zeros(model.vector_size)
+
+    # Average the vectors
+    return np.mean(word_vectors, axis=0)
+
+def create_document_vectors(texts, model, batch_size=100):
+    """Create document vectors for a list of texts in batches to save memory"""
+    vectors = []
+
+    for i in tqdm(range(0, len(texts), batch_size)):
+        batch = texts[i:i+batch_size]
+        batch_vectors = [get_fasttext_sentence_vector(text, model) for text in batch]
+        vectors.extend(batch_vectors)
+
+    return np.array(vectors)
+
+def similar_words_to(word, model, topn=10):
+    """Find similar words to the given word"""
+    if word not in model.wv:
+        print(f"Warning: '{word}' not in vocabulary. Using FastText's subword information.")
+
+    similar_words = model.wv.most_similar(word, topn=topn)
+    return similar_words
+
+def most_similar_document(query_text, document_texts, model):
+    """Find the most similar document to the query text"""
+    query_vector = get_fasttext_sentence_vector(query_text, model)
+
+    max_similarity = -1
+    most_similar_idx = -1
+
+    for i, doc in enumerate(document_texts):
+        doc_vector = get_fasttext_sentence_vector(doc, model)
+        # Cosine similarity
+        similarity = np.dot(query_vector, doc_vector) / (np.linalg.norm(query_vector) * np.linalg.norm(doc_vector))
+
+        if similarity > max_similarity:
+            max_similarity = similarity
+            most_similar_idx = i
+
+    return most_similar_idx, max_similarity
+
+# Example usage
+if __name__ == "__main__":
+    # Load data
+    try:
+        data = pd.read_csv('cleaned_data.csv')
+
+        data['cleaned_text'] = data['cleaned_text'].astype(str)
+        texts = data["cleaned_text"].tolist()
+
+        # Load FastText model
+        model_ft = train_fasttext_model(texts, model_path="fasttext_ieee.model")
+
+        # Test with a sample
+        if len(texts) > 0:
+            sample_text = texts[0]
+            sample_vector = get_fasttext_sentence_vector(sample_text, model_ft)
+            print("\nSample text vector shape:", sample_vector.shape)
+            print("First few elements of vector:", sample_vector[:5])
+
+            # Get similar words for a sample word
+            sample_words = nltk.word_tokenize(sample_text.lower())
+            if len(sample_words) > 5:  # Get a word that's not too common/rare
+                sample_word = sample_words[5]
+                print(f"\nWords similar to '{sample_word}':")
+                similar = similar_words_to(sample_word, model_ft)
+                for word, score in similar:
+                    print(f"  {word}: {score:.4f}")
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+# Seq-2-Seq Neural Network Tool
+def create_seq2vec_embeddings(data, model_ft, column='cleaned_text'):
+    """Convert sequences of words to fixed-length document vectors using seq2vec approach"""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+
+    print("Creating seq2vec document embeddings...")
+
+    # Create TF-IDF weights
+    tfidf_vectorizer = TfidfVectorizer(max_features=5000)
+    tfidf_matrix = tfidf_vectorizer.fit_transform(data[column])
+
+    # Get feature names (words)
+    feature_names = tfidf_vectorizer.get_feature_names_out()
+
+    # Create document embeddings by weighted averaging of word vectors
+    doc_embeddings = []
+
+    for i, doc in enumerate(tqdm(data[column])):
+        if not isinstance(doc, str):
+            # Handle non-string entries
+            doc_embeddings.append(np.zeros(model_ft.vector_size))
+            continue
+
+        # Get words in document
+        words = word_tokenize(doc.lower())
+
+        # Get TF-IDF weights for this document
+        doc_tfidf = tfidf_matrix[i].toarray()[0]
+
+        # Initialize document vector
+        doc_vector = np.zeros(model_ft.vector_size)
+        total_weight = 0
+
+        # Weighted sum of word vectors
+        for word in words:
+            if word in model_ft.wv:
+                # Get word index in TF-IDF vocabulary
+                try:
+                    word_idx = np.where(feature_names == word)[0]
+                    if len(word_idx) > 0:
+                        # Get TF-IDF weight
+                        weight = doc_tfidf[word_idx[0]]
+                        # Add weighted word vector
+                        doc_vector += weight * model_ft.wv[word]
+                        total_weight += weight
+                except:
+                    doc_vector += 0.1 * model_ft.wv[word]
+                    total_weight += 0.1
+
+        # Normalize
+        if total_weight > 0:
+            doc_vector /= total_weight
+
+        doc_embeddings.append(doc_vector)
+
+    # Convert to numpy array
+    doc_embeddings = np.array(doc_embeddings)
+
+    # Add to dataframe
+    data['seq2vec_embedding'] = list(doc_embeddings)
+
+    print(f"Created {len(doc_embeddings)} document embeddings of dimension {model_ft.vector_size}")
+    return doc_embeddings
+
+doc_embeddings = create_seq2vec_embeddings(data, model_ft)
+
+# Sentence Embeddings
+import numpy as np
+import pandas as pd
+import nltk
+from nltk.tokenize import sent_tokenize, word_tokenize
+from sklearn.metrics.pairwise import cosine_similarity
+from tqdm.auto import tqdm
+import random
+import os
+from gensim.models import Word2Vec, FastText
+
+nltk.download('punkt', quiet=True)
+
+def train_word2vec_model(texts, model_path="word2vec_model.model", vector_size=100, force_train=False):
+    """
+    Train a Word2Vec model on the given texts or load existing model
+
+    Parameters:
+    - texts: List of text documents
+    - model_path: Path to save/load the model
+    - vector_size: Size of word vectors
+    - force_train: Whether to train a new model even if one exists at model_path
+
+    Returns:
+    - Trained Word2Vec model
+    """
+    if os.path.exists(model_path) and not force_train:
+        print(f"Loading existing Word2Vec model from {model_path}")
+        return Word2Vec.load(model_path)
+
+    print("Training new Word2Vec model...")
+    # Ensure texts are strings
+    texts = [str(text) for text in texts]
+
+    # Tokenize each text into words
+    tokenized_sentences = [nltk.word_tokenize(text.lower()) for text in tqdm(texts)]
+
+    # Train Word2Vec model
+    model_w2v = Word2Vec(
+        sentences=tokenized_sentences,
+        vector_size=vector_size,
+        window=5,
+        min_count=1,
+        workers=4,
+        sg=1  # Skip-gram (1) vs CBOW (0)
+    )
+
+    # Save the model
+    model_w2v.save(model_path)
+    print(f"Word2Vec model saved to {model_path}")
+
+    return model_w2v
+
+def get_sentence_vector(sentence, model):
+    """Calculate sentence vector by averaging word vectors"""
+    # Tokenize and convert to lowercase
+    sentence = str(sentence)  # Ensure sentence is a string
+    words = nltk.word_tokenize(sentence.lower())
+
+    # Filter words that are in the vocabulary
+    words_in_vocab = [word for word in words if word in model.wv]
+
+    if len(words_in_vocab) == 0:
+        # Return zero vector if no words in vocabulary
+        return np.zeros(model.vector_size)
+
+    # Get vectors for words in vocabulary
+    word_vectors = [model.wv[word] for word in words_in_vocab]
+
+    # Average the vectors
+    return np.mean(word_vectors, axis=0)
+
+def get_fasttext_sentence_vector(sentence, model):
+    """Calculate sentence vector by averaging word vectors from FastText"""
+    sentence = str(sentence)  # Ensure sentence is a string
+    words = sentence.lower().split()
+
+    # Get vectors for all words
+    word_vectors = [model.wv[word] for word in words if word in model.wv]
+
+    if len(word_vectors) == 0:
+        # Return zero vector if no words in sentence
+        return np.zeros(model.vector_size)
+
+    # Average the vectors
+    return np.mean(word_vectors, axis=0)
+
+class SimpleAbstractiveBaseline:
+    """
+    Simple abstractive baseline model that:
+    1. Extracts top sentences using cosine similarity
+    2. Creates "abstractive" summaries by shuffling words in sentences
+    """
+
+    def __init__(self, embedding_model, model_type='word2vec'):
+        """
+        Initialize the baseline model
+
+        Parameters:
+        - embedding_model: Pre-trained FastText or Word2Vec model
+        - model_type: Type of embedding model ('word2vec' or 'fasttext')
+        """
+        self.embedding_model = embedding_model
+        self.model_type = model_type
+
+        # Download NLTK resources
+        nltk.download('punkt', quiet=True)
+
+    def extract_key_sentences(self, text, compression_ratio=0.3, min_sentences=2, max_sentences=5):
+        """Extract key sentences using cosine similarity"""
+        # Split into sentences
+        text = str(text)  # Ensure text is a string
+        sentences = sent_tokenize(text)
+
+        if not sentences:
+            return []
+
+        # Calculate target summary length
+        n_sentences = len(sentences)
+        target_n = max(min_sentences, min(max_sentences, int(n_sentences * compression_ratio)))
+
+        # Get sentence embeddings
+        sentence_embeddings = []
+        for sentence in sentences:
+            if self.model_type == 'fasttext':
+                embedding = get_fasttext_sentence_vector(sentence, self.embedding_model)
+            else:
+                # Use Word2Vec embedding
+                embedding = get_sentence_vector(sentence, self.embedding_model)
+
+            sentence_embeddings.append(embedding)
+
+        # Calculate document centroid
+        centroid = np.mean(sentence_embeddings, axis=0)
+
+        # Calculate cosine similarity scores
+        scores = []
+        for embedding in sentence_embeddings:
+            if np.all(embedding == 0) or np.all(centroid == 0):
+                similarity = 0
+            else:
+                similarity = cosine_similarity([embedding], [centroid])[0][0]
+            scores.append(similarity)
+
+        # Rank sentences
+        sentence_scores = list(zip(sentences, scores))
+        ranked_sentences = sorted(sentence_scores, key=lambda x: x[1], reverse=True)
+
+        # Return top N sentences and their scores
+        return ranked_sentences[:target_n]
+
+    def simple_paraphrase(self, sentence):
+        """Simple word shuffling paraphrase"""
+        # Ensure sentence is a string
+        sentence = str(sentence)
+        words = word_tokenize(sentence)
+
+        # Skip very short sentences
+        if len(words) < 4:
+            return sentence
+
+        # Get content words (skip first and last to maintain some structure)
+        content_words = words[1:-1]
+
+        # Skip if too few content words
+        if len(content_words) < 2:
+            return sentence
+
+        # Shuffle the content words
+        random.shuffle(content_words)
+
+        # Reconstruct the sentence with shuffled content
+        paraphrased = [words[0]] + content_words + [words[-1]]
+
+        return ' '.join(paraphrased)
+
+    def generate_abstractive_summary(self, text, num_sentences=3):
+        """
+        Generate abstractive summary by extracting and paraphrasing top sentences
+
+        Parameters:
+        - text: Input text to summarize
+        - num_sentences: Number of top sentences to include
+
+        Returns:
+        - Abstractive summary
+        """
+        # Extract key sentences
+        ranked_sentences = self.extract_key_sentences(
+            text,
+            min_sentences=num_sentences,
+            max_sentences=num_sentences
+        )
+
+        # Extract sentences only (without scores)
+        top_sentences = [sentence for sentence, _ in ranked_sentences[:num_sentences]]
+
+        # Paraphrase each sentence
+        paraphrased_sentences = [self.simple_paraphrase(sentence) for sentence in top_sentences]
+
+        # Join into a summary (ensure all elements are strings)
+        summary = ' '.join([str(s) for s in paraphrased_sentences])
+
+        return summary
+
+    def process_dataframe(self, df, text_column='cleaned_text', output_column='abstractive_summary',
+                         num_sentences=3):
+        """
+        Process an entire DataFrame
+
+        Parameters:
+        - df: Pandas DataFrame
+        - text_column: Column containing cleaned text
+        - output_column: Column name for the output summary
+        - num_sentences: Number of sentences to include in summaries
+
+        Returns:
+        - DataFrame with added summary column
+        """
+        results = df.copy()
+        summaries = []
+
+        for i, row in tqdm(df.iterrows(), total=len(df), desc="Creating abstractive summaries"):
+            text = row[text_column]
+
+            # Convert to string and skip empty texts
+            if not isinstance(text, str):
+                text = str(text)
+
+            if len(text.strip()) == 0:
+                summaries.append("")
+                continue
+
+            # Generate abstractive summary
+            summary = self.generate_abstractive_summary(text, num_sentences)
+            summaries.append(summary)
+
+        # Add summaries to results
+        results[output_column] = summaries
+        return results
+
+    def process_batch(self, df, batch_size=100, text_column='cleaned_text',
+                     output_column='abstractive_summary', num_sentences=3):
+        """
+        Process a DataFrame in batches to show progress and allow interruption
+
+        Parameters:
+        - df: Pandas DataFrame
+        - batch_size: Number of rows to process at once
+        - text_column: Column containing cleaned text
+        - output_column: Column name for the output summary
+        - num_sentences: Number of sentences in summaries
+
+        Returns:
+        - DataFrame with added summary column
+        """
+        results = df.copy()
+        results[output_column] = ""
+
+        # Process in batches
+        for start_idx in range(0, len(df), batch_size):
+            end_idx = min(start_idx + batch_size, len(df))
+            print(f"Processing batch {start_idx//batch_size + 1}, rows {start_idx}-{end_idx-1}")
+
+            batch_df = df.iloc[start_idx:end_idx]
+            batch_results = self.process_dataframe(
+                batch_df,
+                text_column,
+                output_column,
+                num_sentences
+            )
+
+            # Update results
+            results.loc[start_idx:end_idx-1, output_column] = batch_results[output_column].values
+
+            # Save intermediate results
+            results.to_csv('abstractive_summary_results_partial.csv', index=False)
+            print(f"Saved intermediate results ({end_idx}/{len(df)} rows processed)")
+
+        return results
+
+# Function to prepare data for T5 fine-tuning
+def prepare_for_t5(data, text_column='cleaned_text', summary_column='abstractive_summary'):
+    """
+    Prepare data for T5 fine-tuning
+
+    Parameters:
+    - data: DataFrame with text and summaries
+    - text_column: Column name for input text
+    - summary_column: Column name for target summaries
+
+    Returns:
+    - DataFrame ready for T5 training
+    """
+    # Create a new DataFrame for T5
+    t5_data = pd.DataFrame({
+        'input_text': ['summarize: ' + str(text) for text in data[text_column]],
+        'target_summary': [str(summary) for summary in data[summary_column]]
+    })
+
+    return t5_data
+
+def run_abstractive_baseline(data_path, model_path=None, model_type='word2vec',
+                           sample_size=None, num_sentences=3):
+    """
+    Run the complete abstractive baseline pipeline
+
+    Parameters:
+    - data_path: Path to CSV with cleaned_text column
+    - model_path: Path to pre-trained embedding model (will train if None)
+    - model_type: Type of embedding model ('word2vec' or 'fasttext')
+    - sample_size: Optional number of samples to process (for testing)
+    - num_sentences: Number of sentences to include in summaries
+
+    Returns:
+    - Processed DataFrame with abstractive summaries
+    - Embedding model used
+    """
+    # Load data
+    print(f"Loading data from {data_path}")
+    data = pd.read_csv(data_path)
+
+    # Use a sample
+    if sample_size and sample_size < len(data):
+        print(f"Using a sample of {sample_size} rows")
+        data = data.sample(n=sample_size, random_state=42).reset_index(drop=True)
+
+    # Ensure text column is string
+    data['cleaned_text'] = data['cleaned_text'].astype(str)
+    texts = data['cleaned_text'].tolist()
+
+    # Load embedding model
+    embedding_model = None
+    if model_path:
+        if model_type == 'word2vec':
+            if os.path.exists(model_path):
+                print(f"Loading Word2Vec model from {model_path}")
+                embedding_model = Word2Vec.load(model_path)
+            else:
+                print(f"Training Word2Vec model and saving to {model_path}")
+                embedding_model = train_word2vec_model(texts, model_path=model_path)
+        elif model_type == 'fasttext':
+            if os.path.exists(model_path):
+                print(f"Loading FastText model from {model_path}")
+                embedding_model = FastText.load(model_path)
+            else:
+                print("FastText model not found. Please train a FastText model first.")
+                return None, None
+    else:
+        # Train a new model if path not provided
+        if model_type == 'word2vec':
+            print("Training new Word2Vec model")
+            embedding_model = train_word2vec_model(texts, model_path="word2vec_temp.model")
+        else:
+            print("Please provide a path to a pre-trained FastText model.")
+            return None, None
+
+    # Initialize baseline model
+    baseline = SimpleAbstractiveBaseline(
+        embedding_model=embedding_model,
+        model_type=model_type
+    )
+
+    # Process data in batches
+    results = baseline.process_batch(
+        data,
+        batch_size=100,
+        text_column='cleaned_text',
+        output_column='abstractive_summary',
+        num_sentences=num_sentences
+    )
+
+    # Print examples
+    print("\n=== EXAMPLE ABSTRACTIVE SUMMARIES ===")
+    for i in range(min(3, len(results))):
+        print(f"\nExample {i+1}:")
+        print(f"Original text (truncated): {results.iloc[i]['cleaned_text'][:150]}...")
+        print(f"Abstractive summary: {results.iloc[i]['abstractive_summary']}")
+        print("-" * 50)
+
+    # Prepare data for T5
+    t5_data = prepare_for_t5(results)
+    t5_data.to_csv('t5_training_data.csv', index=False)
+    print("Data prepared for T5 fine-tuning and saved to 't5_training_data.csv'")
+
+    # Save final results
+    results.to_csv('abstractive_summary_results.csv', index=False)
+    print("Final results saved to 'abstractive_summary_results.csv'")
+
+    return results, embedding_model
+
+# Main execution
+if __name__ == "__main__":
+    # Run the complete pipeline
+    results, model = run_abstractive_baseline(
+        data_path='cleaned_data.csv',
+        model_path='word2vec_ieee.model',
+        model_type='word2vec',
+        sample_size=50,  # Start with a small sample
+        num_sentences=3  # Number of sentences in summary
+    )
+
+# Sentence Scoring
+import numpy as np
+import nltk
+from nltk.tokenize import sent_tokenize
+from sklearn.metrics.pairwise import cosine_similarity
+from tqdm.auto import tqdm
+from gensim.models import FastText
+
+nltk.download('punkt', quiet=True)
+
+def extract_sentences(text):
+    """Simply split text into sentences without additional cleaning"""
+    return sent_tokenize(text)
+
+def cosine_score_sentences(cleaned_text, embedding_model, model_type='word2vec',
+                          compression_ratio=0.3, min_sentences=2, max_sentences=5):
+    """
+    Score and extract sentences using only cosine similarity
+    with your existing models and cleaned text
+
+    Parameters:
+    - cleaned_text: Already cleaned text from your dataset
+    - embedding_model: Your pre-trained embedding model (FastText or Word2Vec)
+    - model_type: Type of your model ('word2vec' or 'fasttext')
+    - compression_ratio: Target summary length ratio
+    - min_sentences/max_sentences: Limits on summary length
+
+    Returns:
+    - summary: Extracted summary text
+    - scored_sentences: List of (sentence, score) tuples
+    """
+    # Split into sentences
+    sentences = extract_sentences(cleaned_text)
+
+    # Skip empty texts
+    if not sentences:
+        return "", []
+
+    # Calculate target summary length
+    n_sentences = len(sentences)
+    target_n = max(min_sentences, min(max_sentences, int(n_sentences * compression_ratio)))
+
+    # Get sentence embeddings using the appropriate function
+    sentence_embeddings = []
+    for sentence in sentences:
+        # Use the appropriate embedding function based on model type
+        if model_type == 'fasttext':
+            # Use FastText embedding function
+            embedding = get_fasttext_sentence_vector(sentence, embedding_model)
+        else:
+            # Use Word2Vec embedding function
+           from ipython_input_11_21a22b942353 import get_sentence_vector
+           embedding = get_sentence_vector(sentence, embedding_model)
+
+        sentence_embeddings.append(embedding)
+
+    # Calculate document centroid (average embedding)
+    if sentence_embeddings:
+        centroid = np.mean(sentence_embeddings, axis=0)
+
+        # Calculate cosine similarity scores
+        scores = []
+        for embedding in sentence_embeddings:
+            # Handle zero vectors
+            if np.all(embedding == 0) or np.all(centroid == 0):
+                similarity = 0
+            else:
+                similarity = cosine_similarity([embedding], [centroid])[0][0]
+            scores.append(similarity)
+    else:
+        # If no embeddings, assign equal scores
+        scores = [1.0] * len(sentences)
+
+    # Rank sentences
+    sentence_scores = list(zip(sentences, scores))
+    ranked_sentences = sorted(sentence_scores, key=lambda x: x[1], reverse=True)
+
+    # Get top N sentences
+    top_sentences = ranked_sentences[:target_n]
+
+    # Sort by original order
+    sentence_indices = []
+    for i, sent in enumerate(sentences):
+        for ranked_sent, score in top_sentences:
+            if sent == ranked_sent:
+                sentence_indices.append((i, ranked_sent, score))
+                break
+
+    # Sort by original position
+    sentence_indices.sort()
+
+    # Construct summary
+    summary_sentences = [s[1] for s in sentence_indices]
+    summary = ' '.join(summary_sentences)
+
+    # Return summary and detailed sentence scores
+    return summary, [(s[1], s[2]) for s in sentence_indices]
+
+def batch_summarize(data, column_name, embedding_model, model_type='word2vec'):
+    """
+    Process a DataFrame of texts using your existing cleaned text column
+
+    Parameters:
+    - data: Pandas DataFrame with your texts
+    - column_name: Name of the column containing cleaned texts
+    - embedding_model: Your pre-trained embedding model
+    - model_type: Type of your model ('word2vec' or 'fasttext')
+
+    Returns:
+    - summaries: List of extracted summaries
+    """
+    summaries = []
+
+    for i, row in tqdm(data.iterrows(), total=len(data), desc="Extracting summaries"):
+        # Get cleaned text from the specified column
+        text = row[column_name]
+
+        # Skip invalid texts
+        if not isinstance(text, str) or len(text.strip()) == 0:
+            summaries.append("")
+            continue
+
+        # Generate summary
+        summary, _ = cosine_score_sentences(
+            text,
+            embedding_model=embedding_model,
+            model_type=model_type
+        )
+
+        summaries.append(summary)
+
+    return summaries
+
+# Example usage
+if __name__ == "__main__":
+    import pandas as pd
+
+    # Load data with cleaned text
+    data = pd.read_csv('cleaned_data.csv')
+
+    # Load pre-trained models
+    ft_model = FastText.load("fasttext_ieee.model")
+
+    # Generate summaries using cosine similarity
+    summaries = batch_summarize(
+        data,
+        column_name='cleaned_text',
+        embedding_model=ft_model,
+        model_type='fasttext'
+    )
+
+    # Add summaries to DataFrame
+    data['cosine_summary'] = summaries
+
+    # Display some examples
+    for i in range(3):
+        print(f"Original text: {data.iloc[i]['cleaned_text'][:100]}...")
+        print(f"Summary: {data.iloc[i]['cosine_summary']}")
+        print("-" * 50)
