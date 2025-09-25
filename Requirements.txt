@@ -1,3 +1,4 @@
+Python==3.11.11
 pandas==2.2.1
 numpy==1.26.4
 scikit-learn==1.4.1.post1
@@ -8,3 +9,4 @@ evaluate==0.4.1
 rouge-score==0.1.2
 lime==0.2.0.1
 shap==0.44.1
+## google.colab environment
