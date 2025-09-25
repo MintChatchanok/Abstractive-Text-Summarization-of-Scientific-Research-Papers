@@ -19,9 +19,9 @@ This project explores abstractive summarization of domain-specific scientific re
 
 # Project Structure
 <pre>abstractive-summarization/
-├── src/                  # Scripts for preprocessing, scoring, generation
-├── data/                 # Cleaned & original input text files
-├── models/               # (Optional) fine-tuned T5 or saved pipelines
+├── src/                  
+├── data/                 
+├── models/     
 ├── README.md
 └── requirements.txt </pre>
 
