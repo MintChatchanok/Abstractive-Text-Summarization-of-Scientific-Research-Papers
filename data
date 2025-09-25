@@ -1,0 +1,12 @@
+from google.colab import drive
+import pandas as pd
+
+# Mount Google Drive
+drive.mount('/content/drive')
+
+# Define the path to the file in Google Drive
+file_path = '/content/drive/My Drive/IEEE_database.csv'
+
+# Read the CSV file into a Pandas DataFrame and assign it to 'data'
+data = pd.read_csv(file_path)
+print(data.head())
