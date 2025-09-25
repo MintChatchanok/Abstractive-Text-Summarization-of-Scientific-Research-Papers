@@ -1,0 +1,1973 @@
+import numpy as np
+import pandas as pd
+import nltk
+from nltk.tokenize import sent_tokenize, word_tokenize
+from sklearn.metrics.pairwise import cosine_similarity
+from tqdm.auto import tqdm
+import random
+
+nltk.download('punkt', quiet=True)
+
+# Function for sentence embedding with FastText
+def get_fasttext_sentence_vector(sentence, model):
+    """Calculate sentence vector by averaging word vectors from FastText"""
+    words = sentence.lower().split()
+
+    # Get vectors for all words
+    word_vectors = [model.wv[word] for word in words if word in model.wv]
+
+    if len(word_vectors) == 0:
+        # Return zero vector if no words in sentence
+        return np.zeros(model.vector_size)
+
+    # Average the vectors
+    return np.mean(word_vectors, axis=0)
+
+class SimpleAbstractiveBaseline:
+    """
+    Simple abstractive baseline model that:
+    1. Extracts top sentences using cosine similarity
+    2. Creates "abstractive" summaries by shuffling words in sentences
+    """
+
+    def __init__(self, embedding_model, model_type='fasttext'):
+        """
+        Initialize the baseline model
+
+        Parameters:
+        - embedding_model: Pre-trained FastText or Word2Vec model
+        - model_type: Type of embedding model ('fasttext' or 'word2vec')
+        """
+        self.embedding_model = embedding_model
+        self.model_type = model_type
+
+        # Download NLTK resources
+        nltk.download('punkt', quiet=True)
+
+    def extract_key_sentences(self, text, compression_ratio=0.3, min_sentences=2, max_sentences=5):
+        """Extract key sentences using cosine similarity"""
+        # Split into sentences
+        sentences = sent_tokenize(text)
+
+        if not sentences:
+            return []
+
+        # Calculate target summary length
+        n_sentences = len(sentences)
+        target_n = max(min_sentences, min(max_sentences, int(n_sentences * compression_ratio)))
+
+        # Get sentence embeddings
+        sentence_embeddings = []
+        for sentence in sentences:
+            if self.model_type == 'fasttext':
+                embedding = get_fasttext_sentence_vector(sentence, self.embedding_model)
+            else:
+                from word2vec_sentence_embeddings import get_sentence_vector
+                embedding = get_sentence_vector(sentence, self.embedding_model)
+
+            sentence_embeddings.append(embedding)
+
+        # Calculate document centroid
+        centroid = np.mean(sentence_embeddings, axis=0)
+
+        # Calculate cosine similarity scores
+        scores = []
+        for embedding in sentence_embeddings:
+            if np.all(embedding == 0) or np.all(centroid == 0):
+                similarity = 0
+            else:
+                similarity = cosine_similarity([embedding], [centroid])[0][0]
+            scores.append(similarity)
+
+        # Rank sentences
+        sentence_scores = list(zip(sentences, scores))
+        ranked_sentences = sorted(sentence_scores, key=lambda x: x[1], reverse=True)
+
+        # Return top N sentences and their scores
+        return ranked_sentences[:target_n]
+
+    def simple_paraphrase(self, sentence):
+        """Simple word shuffling paraphrase"""
+        words = word_tokenize(sentence)
+
+        # Skip very short sentences
+        if len(words) < 4:
+            return sentence
+
+        # Get content words (skip first and last to maintain some structure)
+        content_words = words[1:-1]
+
+        # Skip if too few content words
+        if len(content_words) < 2:
+            return sentence
+
+        # Shuffle the content words
+        random.shuffle(content_words)
+
+        # Reconstruct the sentence with shuffled content
+        paraphrased = [words[0]] + content_words + [words[-1]]
+
+        return ' '.join(paraphrased)
+
+    def generate_abstractive_summary(self, text, num_sentences=3):
+        """
+        Generate abstractive summary by extracting and paraphrasing top sentences
+
+        Parameters:
+        - text: Input text to summarize
+        - num_sentences: Number of top sentences to include
+
+        Returns:
+        - Abstractive summary
+        """
+        # Extract key sentences
+        ranked_sentences = self.extract_key_sentences(
+            text,
+            min_sentences=num_sentences,
+            max_sentences=num_sentences
+        )
+
+        # Extract sentences only (without scores)
+        top_sentences = [sentence for sentence, _ in ranked_sentences[:num_sentences]]
+
+        # Paraphrase each sentence
+        paraphrased_sentences = [self.simple_paraphrase(sentence) for sentence in top_sentences]
+
+        # Join into a summary
+        summary = ' '.join(paraphrased_sentences)
+
+        return summary
+
+    def process_dataframe(self, df, text_column='cleaned_text', output_column='abstractive_summary',
+                         num_sentences=3):
+        """
+        Process an entire DataFrame
+
+        Parameters:
+        - df: Pandas DataFrame
+        - text_column: Column containing cleaned text
+        - output_column: Column name for the output summary
+        - num_sentences: Number of sentences to include in summaries
+
+        Returns:
+        - DataFrame with added summary column
+        """
+        results = df.copy()
+        summaries = []
+
+        for i, row in tqdm(df.iterrows(), total=len(df), desc="Creating abstractive summaries"):
+            text = row[text_column]
+
+            # Skip invalid texts
+            if not isinstance(text, str) or len(text.strip()) == 0:
+                summaries.append("")
+                continue
+
+            # Generate abstractive summary
+            summary = self.generate_abstractive_summary(text, num_sentences)
+            summaries.append(summary)
+
+        # Add summaries to results
+        results[output_column] = summaries
+        return results
+
+    def process_batch(self, df, batch_size=100, text_column='cleaned_text',
+                     output_column='abstractive_summary', num_sentences=3):
+        """
+        Process a DataFrame in batches to show progress and allow interruption
+
+        Parameters:
+        - df: Pandas DataFrame
+        - batch_size: Number of rows to process at once
+        - text_column: Column containing cleaned text
+        - output_column: Column name for the output summary
+        - num_sentences: Number of sentences in summaries
+
+        Returns:
+        - DataFrame with added summary column
+        """
+        results = df.copy()
+        results[output_column] = ""
+
+        # Process in batches
+        for start_idx in range(0, len(df), batch_size):
+            end_idx = min(start_idx + batch_size, len(df))
+            print(f"Processing batch {start_idx//batch_size + 1}, rows {start_idx}-{end_idx-1}")
+
+            batch_df = df.iloc[start_idx:end_idx]
+            batch_results = self.process_dataframe(
+                batch_df,
+                text_column,
+                output_column,
+                num_sentences
+            )
+
+            # Update results
+            results.loc[start_idx:end_idx-1, output_column] = batch_results[output_column].values
+
+            # Save intermediate results
+            results.to_csv('abstractive_summary_results_partial.csv', index=False)
+            print(f"Saved intermediate results ({end_idx}/{len(df)} rows processed)")
+
+        return results
+
+# Example usage
+def run_simple_abstractive_baseline(data_path, embedding_model, model_type='fasttext',
+                                  sample_size=None, num_sentences=3):
+    """
+    Run the simple abstractive baseline on a dataset
+
+    Parameters:
+    - data_path: Path to CSV with cleaned_text column
+    - embedding_model: Pre-trained embedding model
+    - model_type: Type of embedding model ('fasttext' or 'word2vec')
+    - sample_size: Optional, number of samples to process (for testing)
+    - num_sentences: Number of sentences to include in summaries
+
+    Returns:
+    - Processed DataFrame with abstractive summaries
+    """
+    # Load data
+    data = pd.read_csv(data_path)
+
+    # Use a sample if specified
+    if sample_size and sample_size < len(data):
+        print(f"Using a sample of {sample_size} rows")
+        data = data.sample(sample_size, random_state=42).reset_index(drop=True)
+
+    # Initialize baseline model
+    baseline = SimpleAbstractiveBaseline(
+        embedding_model=embedding_model,
+        model_type=model_type
+    )
+
+    # Process data in batches
+    results = baseline.process_batch(
+        data,
+        batch_size=100,
+        num_sentences=num_sentences
+    )
+
+    # Print examples
+    print("\n=== EXAMPLE ABSTRACTIVE SUMMARIES ===")
+    for i in range(min(3, len(results))):
+        print(f"\nExample {i+1}:")
+        print(f"Original text (truncated): {results.iloc[i]['cleaned_text'][:150]}...")
+        print(f"Abstractive summary: {results.iloc[i]['abstractive_summary']}")
+        print("-" * 50)
+
+    return results
+
+# Function to prepare data for T5 training
+def prepare_for_t5(data, text_column='cleaned_text', summary_column='abstractive_summary'):
+    """
+    Prepare data for T5 fine-tuning
+
+    Parameters:
+    - data: DataFrame with text and summaries
+    - text_column: Column name for input text
+    - summary_column: Column name for target summaries
+
+    Returns:
+    - DataFrame ready for T5 training
+    """
+    # Create a new DataFrame for T5
+    t5_data = pd.DataFrame({
+        'input_text': ['summarize: ' + text for text in data[text_column]],
+        'target_summary': data[summary_column]
+    })
+
+    return t5_data
+
+# If running as main
+if __name__ == "__main__":
+    from gensim.models import FastText, Word2Vec
+
+    # Load pre-trained embedding model
+    try:
+        ft_model = FastText.load("fasttext_ieee.model")
+
+        # Run baseline on a small sample first
+        sample_results = run_simple_abstractive_baseline(
+            data_path='cleaned_data.csv',
+            embedding_model=ft_model,
+            model_type='fasttext',
+            sample_size=50,  # Start with a small sample
+            num_sentences=3  # Number of sentences in summary
+        )
+
+        # Prepare for T5 fine-tuning
+        t5_train_data = prepare_for_t5(sample_results)
+        t5_train_data.to_csv('t5_training_data.csv', index=False)
+
+        print("Data prepared for T5 fine-tuning and saved to 't5_training_data.csv'")
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+# T5 Implementation
+import pandas as pd
+import numpy as np
+from transformers import T5Tokenizer, T5ForConditionalGeneration, pipeline
+from tqdm.auto import tqdm
+import torch
+import os
+import gc
+from nltk.tokenize import word_tokenize
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import TfidfVectorizer
+from gensim.models import FastText
+import nltk
+
+nltk.download('punkt', quiet=True)
+
+# Set device configuration (use GPU if available)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+
+# Load the T5 model and tokenizer
+def load_t5_model(model_name="t5-small"):
+    """
+    Loads the pre-trained T5 model and tokenizer from Hugging Face Transformers.
+
+    Args:
+        model_name (str): The name of the T5 model to load. Defaults to "t5-small".
+
+    Returns:
+        tuple: The T5 tokenizer and model.
+    """
+    print(f"Loading T5 model: {model_name}")
+    tokenizer = T5Tokenizer.from_pretrained(model_name)
+    model = T5ForConditionalGeneration.from_pretrained(model_name).to(device)
+    return tokenizer, model
+
+# Load the training data
+def load_training_data(file_path="t5_training_data.csv", fallback_path="cleaned_data.csv"):
+    """
+    Loads the training data from a CSV file with fallback option.
+
+    Args:
+        file_path (str): The path to the CSV file containing the training data.
+        fallback_path (str): Fallback path if the main file is not found.
+
+    Returns:
+        pd.DataFrame: The training data as a Pandas DataFrame.
+    """
+    try:
+        print(f"Loading training data from: {file_path}")
+        data_df = pd.read_csv(file_path)
+
+        # Check if data has required columns
+        if 'input_text' not in data_df.columns or 'target_summary' not in data_df.columns:
+            print("Training data has incorrect columns. Falling back to original data.")
+            raise FileNotFoundError
+
+        # Ensure input has "summarize:" prefix
+        if not data_df['input_text'].str.startswith('summarize:').all():
+            print("Adding 'summarize:' prefix to inputs...")
+            data_df['input_text'] = data_df['input_text'].apply(
+                lambda x: f"summarize: {x}" if not str(x).startswith('summarize:') else x
+            )
+
+        return data_df
+
+    except FileNotFoundError:
+        print(f"File not found: {file_path}. Loading original data from {fallback_path}")
+        try:
+            # Load original data
+            data_df = pd.read_csv(fallback_path)
+
+            # Create T5 format data
+            result_df = pd.DataFrame({
+                'input_text': ['summarize: ' + str(text) for text in data_df['cleaned_text']],
+                'target_summary': [str(text) for text in data_df['abstract']]
+            })
+
+            return result_df
+        except Exception as e:
+            print(f"Error loading fallback data: {e}")
+            return None
+
+# Create seq2vec document embeddings
+def create_seq2vec_embeddings(texts, fasttext_model=None, model_path="fasttext_ieee.model"):
+    """
+    Create seq2vec document embeddings using TF-IDF weighted word vectors
+
+    Parameters:
+    - texts: List of document texts
+    - fasttext_model: Pre-loaded FastText model (optional)
+    - model_path: Path to FastText model if not provided
+
+    Returns:
+    - Document embeddings array, TF-IDF vectorizer, FastText model
+    """
+    print("Creating seq2vec document embeddings...")
+
+    # Load FastText model
+    if fasttext_model is None:
+        try:
+            fasttext_model = FastText.load(model_path)
+            print(f"Loaded FastText model from {model_path}")
+        except Exception as e:
+            print(f"Could not load FastText model: {e}")
+            return None, None, None
+
+    # Create TF-IDF weights
+    tfidf_vectorizer = TfidfVectorizer(max_features=5000)
+    tfidf_matrix = tfidf_vectorizer.fit_transform(texts)
+
+    # Get feature names (words)
+    feature_names = tfidf_vectorizer.get_feature_names_out()
+
+    # Create document embeddings by weighted averaging of word vectors
+    doc_embeddings = []
+
+    for i, doc in enumerate(tqdm(texts, desc="Creating seq2vec embeddings")):
+        # Ensure document is a string
+        if not isinstance(doc, str):
+            doc_embeddings.append(np.zeros(fasttext_model.vector_size))
+            continue
+
+        # Get words in document
+        words = word_tokenize(doc.lower())
+
+        # Get TF-IDF weights for this document
+        doc_tfidf = tfidf_matrix[i].toarray()[0]
+
+        # Initialize document vector
+        doc_vector = np.zeros(fasttext_model.vector_size)
+        total_weight = 0
+
+        # Weighted sum of word vectors
+        for word in words:
+            if word in fasttext_model.wv:
+                # Get word index in TF-IDF vocabulary
+                try:
+                    word_idx = np.where(feature_names == word)[0]
+                    if len(word_idx) > 0:
+                        # Get TF-IDF weight
+                        weight = doc_tfidf[word_idx[0]]
+                        # Add weighted word vector
+                        doc_vector += weight * fasttext_model.wv[word]
+                        total_weight += weight
+                except:
+                    # Use default weight if word not in TF-IDF vocabulary
+                    doc_vector += 0.1 * fasttext_model.wv[word]
+                    total_weight += 0.1
+
+        # Normalize
+        if total_weight > 0:
+            doc_vector /= total_weight
+
+        doc_embeddings.append(doc_vector)
+
+    # Convert to numpy array
+    doc_embeddings = np.array(doc_embeddings)
+    print(f"Created {len(doc_embeddings)} document embeddings of dimension {fasttext_model.vector_size}")
+
+    return doc_embeddings, tfidf_vectorizer, fasttext_model
+
+# Create simple embedding for comparison
+def create_simple_embedding(text, fasttext_model):
+    """Create simple word vector average for a text"""
+    if not isinstance(text, str) or len(text.strip()) == 0:
+        return None
+
+    words = word_tokenize(text.lower())
+    word_vectors = [fasttext_model.wv[word] for word in words if word in fasttext_model.wv]
+
+    if len(word_vectors) == 0:
+        return None
+
+    return np.mean(word_vectors, axis=0)
+
+# Select best summary based on semantic similarity
+def select_best_summary(candidates, doc_embedding, fasttext_model):
+    """
+    Select the best summary candidate based on semantic similarity to the document
+
+    Parameters:
+    - candidates: List of summary candidates
+    - doc_embedding: Document embedding from seq2vec
+    - fasttext_model: FastText model for creating embeddings
+
+    Returns:
+    - Index of best candidate
+    """
+    best_score = -1
+    best_idx = 0
+
+    for i, candidate in enumerate(candidates):
+        # Skip empty candidates
+        if not candidate or len(candidate.strip()) == 0:
+            continue
+
+        # Calculate embedding for this candidate
+        candidate_embedding = create_simple_embedding(candidate, fasttext_model)
+
+        if candidate_embedding is not None:
+            # Calculate cosine similarity with document embedding
+            similarity = cosine_similarity([candidate_embedding], [doc_embedding])[0][0]
+
+            # Select candidate with highest similarity
+            if similarity > best_score:
+                best_score = similarity
+                best_idx = i
+
+    return best_idx
+
+# Enhanced T5 summarization with seq2vec guidance
+def enhanced_process_in_batches(texts, summarizer, fasttext_model=None, doc_embeddings=None,
+                               batch_size=5, max_length=150, min_length=40):
+    """
+    Process texts in batches with seq2vec guidance for better summaries
+
+    Parameters:
+    - texts: List of texts to summarize
+    - summarizer: Hugging Face pipeline for summarization
+    - fasttext_model: FastText model for creating embeddings
+    - doc_embeddings: Document embeddings from seq2vec
+    - batch_size: Number of texts to process at once
+    - max_length: Maximum length of summaries
+    - min_length: Minimum length of summaries
+
+    Returns:
+    - List of summaries
+    """
+    all_summaries = []
+    use_seq2vec = doc_embeddings is not None and fasttext_model is not None
+
+    for i in tqdm(range(0, len(texts), batch_size), desc="Generating enhanced summaries"):
+        batch = texts[i:i+batch_size]
+        batch_indices = list(range(i, min(i+batch_size, len(texts))))
+
+        # Make sure all texts start with "summarize:"
+        batch = [
+            text if str(text).startswith('summarize:') else f"summarize: {text}"
+            for text in batch
+        ]
+
+        # Generate multiple candidate summaries if using seq2vec
+        if use_seq2vec:
+            # For each text in batch, generate multiple summaries with different settings
+            batch_summaries = []
+
+            for j, text in enumerate(batch):
+                # Generate 3 candidate summaries with different parameters
+                candidates = []
+
+                # Candidate 1: Standard
+                try:
+                    summary1 = summarizer(
+                        text,
+                        max_length=max_length,
+                        min_length=min_length,
+                        do_sample=False,
+                        num_beams=4
+                    )
+
+                    # Candidate 2: More diverse
+                    summary2 = summarizer(
+                        text,
+                        max_length=max_length,
+                        min_length=min_length,
+                        do_sample=True,
+                        temperature=0.7,
+                        top_k=50
+                    )
+
+                    # Candidate 3: More focused
+                    summary3 = summarizer(
+                        text,
+                        max_length=max_length,
+                        min_length=min_length,
+                        do_sample=False,
+                        num_beams=2,
+                        repetition_penalty=1.2
+                    )
+
+                    # Extract summary texts
+                    candidates = [
+                        summary1[0]['summary_text'],
+                        summary2[0]['summary_text'],
+                        summary3[0]['summary_text']
+                    ]
+
+                    # Select best candidate based on seq2vec similarity
+                    best_idx = select_best_summary(candidates, doc_embeddings[batch_indices[j]], fasttext_model)
+                    batch_summaries.append(candidates[best_idx])
+
+                except Exception as e:
+                    print(f"Error generating candidates for text {j}: {e}")
+                    # Fall back to standard summarization for this text
+                    try:
+                        standard_summary = summarizer(
+                            text,
+                            max_length=max_length,
+                            min_length=min_length,
+                            do_sample=False
+                        )
+                        batch_summaries.append(standard_summary[0]['summary_text'])
+                    except:
+                        batch_summaries.append("Failed to generate summary.")
+
+        else:
+            # Standard summarization without seq2vec guidance
+            try:
+                batch_summaries = summarizer(
+                    batch,
+                    max_length=max_length,
+                    min_length=min_length,
+                    do_sample=False
+                )
+
+                # Extract summary texts
+                if isinstance(batch_summaries[0], dict):
+                    # Single text input returns dict directly
+                    batch_summaries = [summary['summary_text'] for summary in batch_summaries]
+                else:
+                    # Batch input returns list of lists
+                    batch_summaries = [summary[0]['summary_text'] for summary in batch_summaries]
+            except Exception as e:
+                print(f"Error in batch summarization: {e}")
+                # Generate empty summaries as fallback
+                batch_summaries = ["Failed to generate summary."] * len(batch)
+
+        all_summaries.extend(batch_summaries)
+
+        # Clean up to avoid memory issues
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    return all_summaries
+
+def enhanced_main():
+    """Main function with seq2vec enhanced T5 summarization"""
+    # Load T5 model and tokenizer
+    tokenizer, model = load_t5_model(model_name='t5-small')
+
+    # Initialize the summarization pipeline
+    summarizer = pipeline(
+        "summarization",
+        model=model,
+        tokenizer=tokenizer,
+        framework="pt",
+        device=0 if torch.cuda.is_available() else -1
+    )
+
+    # Load data
+    data_df = load_training_data()
+    if data_df is None or len(data_df) == 0:
+        print("No data loaded. Exiting.")
+        return False
+
+    # Create a sample for testing
+    sample_size = 20
+    if len(data_df) > sample_size:
+        sample_df = data_df.sample(n=sample_size, random_state=42)
+    else:
+        sample_df = data_df
+
+    # Get original texts
+    original_texts = [
+        text[len("summarize:"):].strip() if str(text).startswith("summarize:") else text
+        for text in sample_df['input_text']
+    ]
+
+    # Load FastText model and create seq2vec embeddings
+    try:
+        # Create seq2vec document embeddings
+        doc_embeddings, tfidf_vectorizer, fasttext_model = create_seq2vec_embeddings(
+            original_texts,
+            model_path="fasttext_ieee.model"
+        )
+
+        use_seq2vec = doc_embeddings is not None and fasttext_model is not None
+        if use_seq2vec:
+            print("Seq2Vec enhancement activated")
+        else:
+            print("Seq2Vec enhancement not available")
+    except Exception as e:
+        print(f"Error setting up seq2vec: {e}")
+        print("Proceeding without seq2vec enhancement")
+        use_seq2vec = False
+        doc_embeddings = None
+        fasttext_model = None
+
+    # Generate enhanced first-level summaries
+    print("\n===== GENERATING SEQ2VEC-ENHANCED SUMMARIES =====")
+    first_level_summaries = enhanced_process_in_batches(
+        sample_df['input_text'].tolist(),
+        summarizer,
+        fasttext_model=fasttext_model,  # Pass the model
+        doc_embeddings=doc_embeddings,
+        batch_size=5
+    )
+
+    # Generate second-level summaries (summaries of summaries)
+    print("\n===== GENERATING SECOND-LEVEL SUMMARIES =====")
+    second_level_inputs = [f"summarize: {text}" for text in first_level_summaries]
+
+    # create new seq2vec embeddings from first-level summaries
+    if use_seq2vec:
+        try:
+            second_level_embeddings, _, _ = create_seq2vec_embeddings(
+                first_level_summaries,
+                fasttext_model=fasttext_model
+            )
+        except Exception as e:
+            print(f"Error creating second-level embeddings: {e}")
+            second_level_embeddings = None
+    else:
+        second_level_embeddings = None
+
+    second_level_summaries = enhanced_process_in_batches(
+        second_level_inputs,
+        summarizer,
+        fasttext_model=fasttext_model,  # Pass the model
+        doc_embeddings=second_level_embeddings,
+        batch_size=5,
+        max_length=75,
+        min_length=20
+    )
+
+    # Display results
+    print("\n===== SEQ2VEC-ENHANCED SUMMARY EXAMPLES =====")
+    for i in range(min(5, len(sample_df))):
+        print(f"\nExample {i+1}:")
+        print(f"Original text (truncated): {original_texts[i][:150]}...")
+        print(f"Seq2Vec-enhanced summary: {first_level_summaries[i]}")
+        print(f"Second-level summary: {second_level_summaries[i]}")
+        if 'target_summary' in sample_df.columns:
+            print(f"Reference summary: {sample_df['target_summary'].iloc[i]}")
+        print("-" * 50)
+
+    # Save the results
+    results_df = pd.DataFrame({
+        'original_text': original_texts,
+        'seq2vec_enhanced_summary': first_level_summaries,
+        'second_level_summary': second_level_summaries
+    })
+
+    if 'target_summary' in sample_df.columns:
+        results_df['reference_summary'] = sample_df['target_summary'].values
+
+    results_df.to_csv('t5_seq2vec_enhanced_summaries.csv', index=False)
+    print("\nResults saved to 't5_seq2vec_enhanced_summaries.csv'")
+
+    return use_seq2vec
+
+if __name__ == "__main__":
+    enhanced_main()
+
+# Advanced models
+# Pre-trained T5
+import pandas as pd
+import numpy as np
+from transformers import T5ForConditionalGeneration, T5Tokenizer, pipeline
+from rouge_score import rouge_scorer
+from tqdm.auto import tqdm
+import torch
+import nltk
+import os
+import time
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+try:
+    nltk.download('punkt', quiet=True)
+except:
+    print("Could not download NLTK punkt. Will proceed anyway.")
+
+class T5Summarizer:
+    """T5 Summarization system using pre-trained models"""
+
+    def __init__(self, model_name="t5-small", device=None):
+        """
+        Initialize the T5 summarizer with a specific model
+
+        Args:
+            model_name: Name of the pre-trained T5 model ('t5-small', 't5-base', 't5-large')
+            device: Computation device ('cpu', 'cuda', or None for auto-detection)
+        """
+        print(f"\n{'='*50}")
+        print(f"Initializing T5 Summarizer with {model_name}")
+        print(f"{'='*50}")
+
+        # Set computation device
+        if device is None:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(device)
+
+        print(f"Using device: {self.device}")
+
+        # Load model and tokenizer
+        start_time = time.time()
+        print(f"Loading {model_name} model and tokenizer...")
+
+        self.tokenizer = T5Tokenizer.from_pretrained(model_name)
+        self.model = T5ForConditionalGeneration.from_pretrained(model_name).to(self.device)
+
+        # Create summarization pipeline
+        self.summarizer = pipeline(
+            "summarization",
+            model=self.model,
+            tokenizer=self.tokenizer,
+            device=0 if self.device.type == 'cuda' else -1
+        )
+
+        load_time = time.time() - start_time
+        print(f"Model loaded in {load_time:.2f} seconds")
+
+        # Initialize ROUGE scorer
+        self.rouge_scorer = rouge_scorer.RougeScorer(
+            ['rouge1', 'rouge2', 'rougeL'],
+            use_stemmer=True
+        )
+
+        # Track metrics
+        self.metrics = {}
+
+    def preprocess_text(self, text):
+        """
+        Preprocess input text for summarization
+
+        Args:
+            text: Input text string
+
+        Returns:
+            Preprocessed text
+        """
+        if text is None or pd.isna(text):
+            return "Empty document"
+
+        # Convert to string and ensure T5 prefix
+        text_str = str(text).strip()
+        if not text_str.startswith("summarize:"):
+            text_str = f"summarize: {text_str}"
+
+        return text_str
+
+    def generate_summary(self, text, max_length=100, min_length=30):
+        """
+        Generate summary for a single text
+
+        Args:
+            text: Input text to summarize
+            max_length: Maximum summary length
+            min_length: Minimum summary length
+
+        Returns:
+            Generated summary
+        """
+        # Preprocess text
+        processed_text = self.preprocess_text(text)
+
+        # Adjust summary length based on input length
+        words = processed_text.split()
+        input_length = len(words)
+
+        # Set reasonable length parameters
+        if input_length < 20:
+            adj_max_length = min(50, input_length * 2)
+            adj_min_length = min(10, max(3, input_length // 2))
+        else:
+            adj_max_length = min(max_length, max(30, input_length // 2))
+            adj_min_length = min(min_length, max(10, input_length // 4))
+
+        # Generate summary
+        try:
+            summary = self.summarizer(
+                processed_text,
+                max_length=adj_max_length,
+                min_length=adj_min_length,
+                do_sample=False
+            )
+
+            # Extract summary text
+            if isinstance(summary, list):
+                return summary[0]['summary_text']
+            else:
+                return summary['summary_text']
+
+        except Exception as e:
+            print(f"Error generating summary: {e}")
+            return "Error generating summary"
+
+    def batch_summarize(self, texts, batch_size=5):
+        """
+        Generate summaries for multiple texts
+
+        Args:
+            texts: List of texts to summarize
+            batch_size: Number of texts to process at once
+
+        Returns:
+            List of generated summaries
+        """
+        all_summaries = []
+
+        # Process texts in batches
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i:min(i+batch_size, len(texts))]
+
+            # Show progress
+            batch_range = f"{i+1}-{i+len(batch)}/{len(texts)}"
+            print(f"Processing batch {batch_range}", end='\r')
+
+            # Process each text in the batch
+            batch_summaries = []
+            for text in batch:
+                summary = self.generate_summary(text)
+                batch_summaries.append(summary)
+
+            all_summaries.extend(batch_summaries)
+
+        print(f"Processed all {len(texts)} texts                ")
+        return all_summaries
+
+    def calculate_bleu(self, references, summaries):
+        """
+        Calculate BLEU scores for the generated summaries
+
+        Args:
+            references: List of reference summaries
+            summaries: List of generated summaries
+
+        Returns:
+            Dictionary of BLEU scores
+        """
+        from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+
+        # Define smoothing method (important for shorter texts)
+        smoother = SmoothingFunction().method4
+
+        bleu_scores = []
+        bleu_scores_1 = []
+        bleu_scores_2 = []
+
+        valid_pairs = 0
+
+        for i, (ref, gen) in enumerate(zip(references, summaries)):
+            try:
+                # Ensure both are strings
+                ref = str(ref).strip() if not pd.isna(ref) else "Empty reference"
+                gen = str(gen).strip() if not pd.isna(gen) else "Empty summary"
+
+                # Skip empty texts
+                if len(ref) == 0 or len(gen) == 0:
+                    continue
+
+                # Tokenize reference and hypothesis
+                ref_tokens = nltk.word_tokenize(ref.lower())
+                gen_tokens = nltk.word_tokenize(gen.lower())
+
+                # Calculate BLEU scores (with different n-gram weights)
+                # BLEU-1 (unigrams only)
+                bleu_1 = sentence_bleu([ref_tokens], gen_tokens,
+                                     weights=(1, 0, 0, 0),
+                                     smoothing_function=smoother)
+
+                # BLEU-2 (unigrams and bigrams)
+                bleu_2 = sentence_bleu([ref_tokens], gen_tokens,
+                                     weights=(0.5, 0.5, 0, 0),
+                                     smoothing_function=smoother)
+
+                # BLEU-4 (standard with equal weights for 1-4 grams)
+                bleu_4 = sentence_bleu([ref_tokens], gen_tokens,
+                                     weights=(0.25, 0.25, 0.25, 0.25),
+                                     smoothing_function=smoother)
+
+                bleu_scores.append(bleu_4)
+                bleu_scores_1.append(bleu_1)
+                bleu_scores_2.append(bleu_2)
+                valid_pairs += 1
+
+                # Show a few examples for verification
+                if i < 2 or (i < 10 and i % 5 == 0):
+                    print(f"\nBLEU Example {i+1}:")
+                    print(f"Reference: {ref[:100]}...")
+                    print(f"Generated: {gen[:100]}...")
+                    print(f"BLEU-1: {bleu_1:.4f}, BLEU-2: {bleu_2:.4f}, BLEU-4: {bleu_4:.4f}")
+            except Exception as e:
+                print(f"Error calculating BLEU for pair {i}: {e}")
+
+        # Calculate average scores
+        if not bleu_scores:
+            print("No valid summary pairs to evaluate BLEU")
+            return {"bleu": 0.0, "bleu_1": 0.0, "bleu_2": 0.0}
+
+        avg_bleu = np.mean(bleu_scores)
+        avg_bleu_1 = np.mean(bleu_scores_1)
+        avg_bleu_2 = np.mean(bleu_scores_2)
+
+        # Return as dictionary
+        return {
+            "bleu": avg_bleu,
+            "bleu_1": avg_bleu_1,
+            "bleu_2": avg_bleu_2
+        }
+
+    def evaluate_summaries(self, references, summaries):
+        """
+        Evaluate summaries using ROUGE metrics and BLEU scores
+
+        Args:
+            references: List of reference summaries
+            summaries: List of generated summaries
+
+        Returns:
+            Dictionary of average ROUGE and BLEU scores
+        """
+        print(f"\n{'='*50}")
+        print(f"Evaluating {len(summaries)} summaries")
+        print(f"{'='*50}")
+
+        # Calculate ROUGE scores for each pair
+        rouge_scores = []
+        valid_pairs = 0
+
+        for i, (ref, gen) in enumerate(zip(references, summaries)):
+            try:
+                # Ensure both are strings
+                ref = str(ref).strip() if not pd.isna(ref) else "Empty reference"
+                gen = str(gen).strip() if not pd.isna(gen) else "Empty summary"
+
+                # Skip empty texts
+                if len(ref) == 0 or len(gen) == 0:
+                    continue
+
+                # Calculate ROUGE scores
+                score = self.rouge_scorer.score(ref, gen)
+                rouge_scores.append(score)
+                valid_pairs += 1
+
+                # Show some examples
+                if i < 2 or (i < 10 and i % 5 == 0):
+                    print(f"\nExample {i+1}:")
+                    print(f"Reference: {ref[:100]}...")
+                    print(f"Generated: {gen[:100]}...")
+                    print(f"ROUGE-1 F1: {score['rouge1'].fmeasure:.4f}")
+
+            except Exception as e:
+                print(f"Error evaluating summary {i}: {e}")
+
+        print(f"\nSuccessfully evaluated {valid_pairs} summary pairs")
+
+        # Calculate average scores
+        if not rouge_scores:
+            print("No valid summary pairs to evaluate")
+            return {m + "_" + t: 0.0 for m in ['rouge1', 'rouge2', 'rougeL'] for t in ["precision", "recall", "f1"]}
+
+        # Calculate average scores
+        avg_scores = {}
+        for rouge_type in ['rouge1', 'rouge2', 'rougeL']:
+            avg_scores[f'{rouge_type}_precision'] = np.mean([s[rouge_type].precision for s in rouge_scores])
+            avg_scores[f'{rouge_type}_recall'] = np.mean([s[rouge_type].recall for s in rouge_scores])
+            avg_scores[f'{rouge_type}_f1'] = np.mean([s[rouge_type].fmeasure for s in rouge_scores])
+
+        # Print summary table for ROUGE
+        print("\n" + "=" * 50)
+        print("ROUGE SCORES SUMMARY")
+        print("=" * 50)
+        print(f"{'Metric':<8} | {'Precision':<10} | {'Recall':<10} | {'F1':<10}")
+        print("-" * 50)
+
+        for rouge_type in ['rouge1', 'rouge2', 'rougeL']:
+            print(f"{rouge_type:<8} | {avg_scores[f'{rouge_type}_precision']:.4f}      | "
+                  f"{avg_scores[f'{rouge_type}_recall']:.4f}      | {avg_scores[f'{rouge_type}_f1']:.4f}")
+
+        print("=" * 50)
+
+        # Calculate BLEU scores
+        print("\nCalculating BLEU scores...")
+        bleu_scores = self.calculate_bleu(references, summaries)
+
+        # Print BLEU score summary
+        print("\n" + "=" * 50)
+        print("BLEU SCORES SUMMARY")
+        print("=" * 50)
+        print(f"BLEU-1: {bleu_scores['bleu_1']:.4f}")
+        print(f"BLEU-2: {bleu_scores['bleu_2']:.4f}")
+        print(f"BLEU-4: {bleu_scores['bleu']:.4f}")
+        print("=" * 50)
+
+        # Merge scores
+        combined_scores = {**avg_scores, **bleu_scores}
+
+        # Store metrics
+        self.metrics = combined_scores
+
+        return combined_scores
+
+    def run_evaluation(self, data_df=None, text_col=None, ref_col=None, sample_size=None):
+        """
+        Run full evaluation on a dataset
+
+        Args:
+            data_df: DataFrame with texts and reference summaries
+            text_col: Column name for input texts
+            ref_col: Column name for reference summaries
+            sample_size: Number of samples to use (None for all)
+
+        Returns:
+            Results dictionary
+        """
+        print(f"\n{'='*50}")
+        print(f"RUNNING T5 SUMMARIZATION EVALUATION")
+        print(f"{'='*50}")
+
+        # Create sample data
+        if data_df is None:
+            print("No dataset provided. Using built-in sample data.")
+            data_df = pd.DataFrame({
+                'text': [
+                    "A recent breakthrough in quantum computing has set new speed records for solving complex mathematical problems. The new approach combines traditional quantum bits with a novel error correction method that improves stability.",
+                    "Researchers at Tech University have developed a battery that charges faster and lasts longer than current models. The new battery uses sustainable materials and can be fully charged in just 10 minutes.",
+                    "The latest software update includes enhanced security features designed to protect against cyber threats. It also improves performance and adds several new user-requested features."
+                ],
+                'summary': [
+                    "Quantum computing breakthrough achieves new speed records with novel error correction.",
+                    "Tech University researchers develop sustainable fast-charging long-lasting battery.",
+                    "Software update enhances security, improves performance, and adds user-requested features."
+                ]
+            })
+            text_col = 'text'
+            ref_col = 'summary'
+
+        # Auto-detect columns if not specified
+        if text_col is None:
+            text_col = next((col for col in ['input_text', 'cleaned_text', 'text']
+                             if col in data_df.columns), None)
+            if text_col is None:
+                raise ValueError("Could not identify text column in dataset")
+
+        if ref_col is None:
+            ref_col = next((col for col in ['target_summary', 'abstract', 'summary']
+                           if col in data_df.columns), None)
+            if ref_col is None:
+                raise ValueError("Could not identify reference summary column in dataset")
+
+        print(f"Using columns: {text_col} (input) and {ref_col} (reference)")
+
+        # Handle NaN values
+        data_df[text_col] = data_df[text_col].fillna("Empty document")
+        data_df[ref_col] = data_df[ref_col].fillna("Empty reference")
+
+        # Sample if requested
+        if sample_size and sample_size < len(data_df):
+            print(f"Sampling {sample_size} examples from {len(data_df)} total")
+            eval_df = data_df.sample(n=sample_size, random_state=42)
+        else:
+            eval_df = data_df
+            print(f"Using all {len(eval_df)} examples")
+
+        # Get texts and references
+        texts = eval_df[text_col].tolist()
+        references = eval_df[ref_col].tolist()
+
+        # Generate summaries
+        print(f"\n{'='*50}")
+        print(f"GENERATING SUMMARIES")
+        print(f"{'='*50}")
+
+        start_time = time.time()
+        summaries = self.batch_summarize(texts)
+        gen_time = time.time() - start_time
+
+        print(f"Generated {len(summaries)} summaries in {gen_time:.2f} seconds")
+        print(f"Average time per summary: {gen_time/len(summaries):.2f} seconds")
+
+        # Evaluate with ROUGE and BLEU
+        scores = self.evaluate_summaries(references, summaries)
+
+        # Create output dataframe
+        results_df = pd.DataFrame({
+            'original_text': texts,
+            'reference_summary': references,
+            'generated_summary': summaries
+        })
+
+        # Add ROUGE scores as columns
+        for i, (ref, gen) in enumerate(zip(references, summaries)):
+            try:
+                # Skip empty texts
+                if pd.isna(ref) or pd.isna(gen) or len(str(ref).strip()) == 0 or len(str(gen).strip()) == 0:
+                    results_df.loc[i, 'rouge1_f1'] = np.nan
+                    results_df.loc[i, 'rouge2_f1'] = np.nan
+                    results_df.loc[i, 'rougeL_f1'] = np.nan
+                    results_df.loc[i, 'bleu'] = np.nan
+                    continue
+
+                # Calculate individual ROUGE scores
+                score = self.rouge_scorer.score(str(ref).strip(), str(gen).strip())
+                results_df.loc[i, 'rouge1_f1'] = score['rouge1'].fmeasure
+                results_df.loc[i, 'rouge2_f1'] = score['rouge2'].fmeasure
+                results_df.loc[i, 'rougeL_f1'] = score['rougeL'].fmeasure
+
+                # Calculate individual BLEU score
+                from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+                smoother = SmoothingFunction().method4
+
+                ref_tokens = nltk.word_tokenize(str(ref).strip().lower())
+                gen_tokens = nltk.word_tokenize(str(gen).strip().lower())
+
+                bleu = sentence_bleu([ref_tokens], gen_tokens,
+                                    weights=(0.25, 0.25, 0.25, 0.25),
+                                    smoothing_function=smoother)
+
+                results_df.loc[i, 'bleu'] = bleu
+
+            except Exception as e:
+                print(f"Error calculating individual scores for row {i}: {e}")
+
+        # Save results to CSV
+        output_file = 't5_summarization_results.csv'
+        try:
+            results_df.to_csv(output_file, index=False)
+            print(f"\nResults saved to {output_file}")
+        except Exception as e:
+            print(f"Could not save results to CSV: {e}")
+
+        # Print final summary
+        print(f"\n{'='*50}")
+        print(f"SUMMARIZATION EVALUATION COMPLETE")
+        print(f"{'='*50}")
+        print(f"Model: {self.model.__class__.__name__}")
+        print(f"Samples: {len(texts)}")
+        print(f"ROUGE-1 F1: {scores['rouge1_f1']:.4f}")
+        print(f"ROUGE-2 F1: {scores['rouge2_f1']:.4f}")
+        print(f"ROUGE-L F1: {scores['rougeL_f1']:.4f}")
+        print(f"BLEU-1: {scores['bleu_1']:.4f}")
+        print(f"BLEU-2: {scores['bleu_2']:.4f}")
+        print(f"BLEU-4: {scores['bleu']:.4f}")
+        print(f"{'='*50}")
+
+        return {
+            'scores': scores,
+            'results_df': results_df,
+            'summaries': summaries
+        }
+
+summarizer = T5Summarizer(model_name="t5-small")
+results = summarizer.run_evaluation(sample_size=3)
+
+# After this, I fine-tuned the models to optimize its effectiveness
+
+# Explainability
+from lime.lime_text import LimeTextExplainer
+
+nltk.download('punkt', quiet=True)
+
+# Make sure output directory exists
+os.makedirs("lime_explanations", exist_ok=True)
+def load_t5_model(model_path="t5_scientific_model", model_type="t5-small"):
+    """Load the T5 model and tokenizer"""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    try:
+        if os.path.exists(model_path):
+            print(f"Loading fine-tuned model from {model_path}")
+            model = T5ForConditionalGeneration.from_pretrained(model_path)
+            tokenizer = T5Tokenizer.from_pretrained(model_path)
+        else:
+            print(f"Fine-tuned model not found. Loading base model {model_type}")
+            model = T5ForConditionalGeneration.from_pretrained(model_type)
+            tokenizer = T5Tokenizer.from_pretrained(model_type)
+
+        model.to(device)
+        model.eval()  # Set to evaluation mode
+        return model, tokenizer, device
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        raise
+
+class SummarizationPredictor:
+    """A wrapper for the summarization model that works with LIME"""
+    def __init__(self, model, tokenizer, device=None, prefix="summarize: "):
+        self.model = model
+        self.tokenizer = tokenizer
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = device
+        self.model.to(self.device)
+        self.prefix = prefix
+
+    def predict_proba(self, texts):
+        """Creates a binary classifier based on token importance for summarization"""
+        results = []
+
+        # First generate a summary for the primary text
+        prefix_text = self.prefix + texts[0] if not texts[0].startswith(self.prefix) else texts[0]
+
+        # Tokenize and generate
+        inputs = self.tokenizer(prefix_text, return_tensors="pt", max_length=512,
+                              truncation=True).to(self.device)
+
+        with torch.no_grad():  # Disable gradient calculation for inference
+            try:
+                summary_ids = self.model.generate(
+                    inputs.input_ids,
+                    max_length=150,
+                    min_length=40,
+                    no_repeat_ngram_size=2,
+                    num_beams=4,
+                    early_stopping=True
+                )
+
+                summary = self.tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+
+                # Tokenize the summary to identify important words
+                summary_words = set(nltk.word_tokenize(summary.lower()))
+
+                # Process all perturbed texts from LIME
+                for text in texts:
+                    words = nltk.word_tokenize(text.lower())
+                    result = np.zeros(2)
+
+                    # Calculate overlap between text and summary words
+                    overlap_count = sum(1 for word in words if word in summary_words)
+
+                    # Normalize by text length for a probability-like score
+                    text_len = len(words)
+                    if text_len > 0:
+                        importance_score = min(max(overlap_count / text_len, 0.1), 0.9)
+                    else:
+                        importance_score = 0.5
+
+                    # Set probabilities
+                    result[1] = importance_score  # Probability of being important
+                    result[0] = 1 - importance_score  # Probability of not being important
+
+                    results.append(result)
+
+            except Exception as e:
+                print(f"Error in predict_proba: {e}")
+                default_result = np.array([[0.5, 0.5]] * len(texts))
+                return default_result
+
+        return np.array(results)
+
+    def generate_summary(self, text):
+        """Generate a summary for a text"""
+        prefix_text = self.prefix + text if not text.startswith(self.prefix) else text
+
+        inputs = self.tokenizer(prefix_text, return_tensors="pt", max_length=512,
+                             truncation=True).to(self.device)
+
+        with torch.no_grad():
+            try:
+                summary_ids = self.model.generate(
+                    inputs.input_ids,
+                    max_length=150,
+                    min_length=40,
+                    no_repeat_ngram_size=2,
+                    num_beams=4,
+                    early_stopping=True
+                )
+                return self.tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+            except Exception as e:
+                print(f"Error generating summary: {e}")
+                return "Error generating summary."
+
+def explain_summarization(model, tokenizer, text, num_features=15, num_samples=500):
+    """Generate a LIME explanation for summarization model"""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+
+    print(f"Explaining text: {text[:100]}...")
+
+    # Initialize predictor
+    predictor = SummarizationPredictor(model, tokenizer, device)
+
+    # Generate summary first
+    summary = predictor.generate_summary(text)
+    print(f"Generated summary: {summary}")
+
+    # Create LIME explainer
+    explainer = LimeTextExplainer(
+        class_names=["Not Important", "Important"],
+        split_expression=nltk.word_tokenize,
+        bow=False
+    )
+
+    # Generate LIME explanation
+    print(f"Generating LIME explanation with {num_samples} samples...")
+    try:
+        exp = explainer.explain_instance(
+            text_instance=text,
+            classifier_fn=predictor.predict_proba,
+            num_features=num_features,
+            num_samples=num_samples
+        )
+
+        # Get the explanation as a list of (word, weight) tuples
+        word_importances = exp.as_list()
+
+        # Convert to DataFrame for easier manipulation
+        words_df = pd.DataFrame(word_importances, columns=['word', 'weight'])
+        words_df['abs_weight'] = words_df['weight'].abs()
+        words_df = words_df.sort_values('abs_weight', ascending=False)
+
+        return exp, summary, words_df
+
+    except Exception as e:
+        print(f"Error generating LIME explanation: {e}")
+        return None, summary, None
+
+def visualize_lime_explanation(exp, text, summary, words_df, output_file="lime_explanations/lime_example.png"):
+    """Visualize LIME explanation with guaranteed non-zero values"""
+    if exp is None or words_df is None:
+        print("Cannot visualize: No valid explanation data")
+        return
+
+    plt.figure(figsize=(10, 8))
+
+    # Ensure we have some non-zero values to display
+    if words_df['weight'].abs().max() <= 0.001:
+        print("Warning: All weights are close to zero. Setting arbitrary weights for visualization.")
+        summary_words = set(nltk.word_tokenize(summary.lower()))
+        words_df['synthetic_weight'] = words_df['word'].apply(
+            lambda w: 0.05 if w.lower() in summary_words else -0.02
+        )
+        top_words = words_df.head(15)
+        plt.barh(top_words['word'], top_words['synthetic_weight'],
+                color=['blue' if x > 0 else 'red' for x in top_words['synthetic_weight']])
+        plt.title("LIME Explanation (Synthetic Weights)")
+    else:
+        top_words = words_df.head(15)
+        plt.barh(top_words['word'], top_words['weight'],
+                color=['blue' if x > 0 else 'red' for x in top_words['weight']])
+        plt.title("LIME Explanation: Word Importance for Summarization")
+
+    plt.xlabel("Weight (Blue = Positive Impact, Red = Negative Impact)")
+    plt.ylabel("Word")
+
+    # Add explanation text
+    plt.figtext(0.5, 0.01,
+               "LIME explanation shows which words most influence the model's summarization.\n" +
+               "Blue bars indicate words that increase the probability of being included in summary.\n" +
+               "Red bars indicate words that decrease this probability.",
+               ha="center", fontsize=9,
+               bbox={"facecolor":"lightgrey", "alpha":0.5, "pad":5})
+
+    # Add original text and summary
+    plt.figtext(0.5, 0.92, "Original Text (truncated):", fontweight='bold', ha='center')
+    plt.figtext(0.5, 0.90, text[:100] + "..." if len(text) > 100 else text, ha='center', fontsize=9)
+
+    plt.figtext(0.5, 0.87, "Generated Summary:", fontweight='bold', ha='center')
+    plt.figtext(0.5, 0.85, summary, ha='center', fontsize=9, wrap=True)
+
+    plt.tight_layout(rect=[0, 0.08, 1, 0.85])
+
+    # Make sure the directory exists
+    os.makedirs(os.path.dirname(output_file) if os.path.dirname(output_file) else '.', exist_ok=True)
+    plt.savefig(output_file)
+
+    # Also save HTML explanation
+    html = exp.as_html()
+    html_file = output_file.replace('.png', '.html')
+    with open(html_file, 'w') as f:
+        f.write(html)
+
+    print(f"Visualization saved as '{output_file}'")
+    print(f"HTML visualization saved as '{html_file}'")
+
+    return plt
+
+# Sample text to analyze
+sample_text = """
+Correlation filters (CFs) have been continuously advancing the state-of-the-art tracking performance
+and have been extensively studied in the recent few years. Most of the existing CF trackers adopt a
+cosine window to spatially reweight base image to alleviate boundary discontinuity.
+"""
+
+# Run the analysis step by step
+print("Loading T5 model...")
+model, tokenizer, device = load_t5_model()
+
+print("\nGenerating LIME explanation...")
+exp, summary, words_df = explain_summarization(
+    model=model,
+    tokenizer=tokenizer,
+    text=sample_text,
+    num_features=15,
+    num_samples=100  # Reduced for faster execution
+)
+
+if exp is not None:
+    print("\nCreating visualization...")
+    plt = visualize_lime_explanation(
+        exp=exp,
+        text=sample_text,
+        summary=summary,
+        words_df=words_df,
+        output_file="lime_explanations/example_analysis.png"
+    )
+
+    # Display the plot in the notebook
+    plt.show()
+
+    # Display the top words
+    print("\nTop 10 most important words for summarization:")
+    print(words_df.head(10))
+
+# SHAP for Summarization
+nltk.download('punkt', quiet=True)
+
+# Make sure output directory exists
+os.makedirs("shap_explanations", exist_ok=True)
+
+def load_t5_model(model_path="t5_scientific_model", model_type="t5-small"):
+    """Load the T5 model and tokenizer"""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    try:
+        if os.path.exists(model_path):
+            print(f"Loading fine-tuned model from {model_path}")
+            model = T5ForConditionalGeneration.from_pretrained(model_path)
+            tokenizer = T5Tokenizer.from_pretrained(model_path)
+        else:
+            print(f"Fine-tuned model not found. Loading base model {model_type}")
+            model = T5ForConditionalGeneration.from_pretrained(model_type)
+            tokenizer = T5Tokenizer.from_pretrained(model_type)
+
+        model.to(device)
+        model.eval()  # Set to evaluation mode
+        return model, tokenizer, device
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        raise
+
+class EnhancedSHAPExplainer:
+    """
+    An enhanced SHAP-like explainer for text summarization models
+    """
+    def __init__(self, model, tokenizer, device=None, prefix="summarize: "):
+        self.model = model
+        self.tokenizer = tokenizer
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = device
+        self.model.to(self.device)
+        self.prefix = prefix
+        # Initialize ROUGE scorer for similarity calculations
+        self.rouge_scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+        # Initialize BLEU smoother
+        self.smoother = SmoothingFunction().method1
+
+    def generate_summary(self, text):
+        """Generate a summary for a text"""
+        if not text.startswith(self.prefix):
+            text = self.prefix + text
+
+        # Handle empty or too short inputs
+        if len(text.strip()) < 5:
+            return ""
+
+        inputs = self.tokenizer(text, return_tensors="pt", max_length=512,
+                              truncation=True).to(self.device)
+
+        with torch.no_grad():  # Disable gradient calculation for inference
+            try:
+                summary_ids = self.model.generate(
+                    inputs.input_ids,
+                    max_length=150,
+                    min_length=40,
+                    no_repeat_ngram_size=2,
+                    num_beams=4,
+                    early_stopping=True
+                )
+                summary = self.tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+
+                # Clean up summary if it contains the prompt
+                if "summarize:" in summary.lower():
+                    summary = summary.lower().split("summarize:")[1].strip()
+
+                return summary
+            except Exception as e:
+                print(f"Error generating summary: {e}")
+                return ""
+
+    def calculate_similarity(self, summary1, summary2):
+        """
+        Calculate similarity between two summaries using multiple metrics
+        Returns a combined similarity score
+        """
+        # If either summary is empty, return 0 similarity
+        if not summary1 or not summary2:
+            return 0
+
+        # Calculate ROUGE scores
+        rouge_scores = self.rouge_scorer.score(summary1, summary2)
+
+        # Extract F1 scores
+        rouge1_f1 = rouge_scores['rouge1'].fmeasure
+        rouge2_f1 = rouge_scores['rouge2'].fmeasure
+        rougeL_f1 = rouge_scores['rougeL'].fmeasure
+
+        # Calculate BLEU score
+        reference = [nltk.word_tokenize(summary1.lower())]
+        hypothesis = nltk.word_tokenize(summary2.lower())
+
+        # Handle empty tokenized sequences
+        if not hypothesis or not reference[0]:
+            bleu_score = 0
+        else:
+            try:
+                # Calculate BLEU with smoothing
+                bleu_score = sentence_bleu(reference, hypothesis,
+                                          weights=(0.25, 0.25, 0.25, 0.25),
+                                          smoothing_function=self.smoother)
+            except Exception as e:
+                print(f"Error calculating BLEU: {e}")
+                bleu_score = 0
+
+        # Weighted combination of metrics
+        combined_score = (0.25 * rouge1_f1 +
+                          0.15 * rouge2_f1 +
+                          0.40 * rougeL_f1 +
+                          0.20 * bleu_score)
+
+        return combined_score
+
+    def explain(self, text, num_samples=100, subset_size=0.5):
+        """
+        Generate SHAP-like values for each word in the text
+
+        Args:
+            text: Text to explain
+            num_samples: Number of permutations to sample
+            subset_size: Approximate fraction of words to keep in each sample
+
+        Returns:
+            word_importances: DataFrame with word importances
+            summary: Generated summary
+            words: List of tokenized words
+        """
+        print(f"Generating explanation with {num_samples} samples...")
+
+        # Tokenize the text into words
+        words = nltk.word_tokenize(text)
+        n_words = len(words)
+
+        # Handle very short inputs
+        if n_words < 3:
+            print("Text too short for meaningful explanation")
+            return pd.DataFrame({'word': words, 'importance': [0] * n_words}), "", words
+
+        # Generate a baseline summary for the complete text
+        full_summary = self.generate_summary(text)
+        print(f"Generated summary: {full_summary}")
+
+        # Initialize word importances (Shapley values)
+        word_importances = np.zeros(n_words)
+        word_counts = np.zeros(n_words)  # Track how many times each word is sampled
+
+        # Use stratified sampling to ensure more stable estimates
+        print("Running stratified sampling for SHAP values...")
+        for i in tqdm(range(num_samples), desc="Sampling"):
+            # In each iteration, randomly select words to include
+            # with probability subset_size
+            mask = np.random.binomial(1, subset_size, size=n_words)
+
+            #Keep at least 3 words (or all if fewer than 3)
+            if np.sum(mask) < min(3, n_words):
+                # Force at least min(3, n_words) words to be kept
+                indices = np.random.choice(n_words, min(3, n_words), replace=False)
+                mask[indices] = 1
+
+            # Create text with only the kept words
+            kept_words = [words[j] for j in range(n_words) if mask[j] == 1]
+            perturbed_text = " ".join(kept_words)
+
+            # Generate summary for this subset
+            perturbed_summary = self.generate_summary(perturbed_text)
+
+            # Calculate similarity between full and perturbed summaries
+            similarity = self.calculate_similarity(full_summary, perturbed_summary)
+
+            # For each word, update its importance
+            for j in range(n_words):
+                word_counts[j] += 1
+                if mask[j] == 1:
+                    # Word was included - contributes to similarity
+                    word_importances[j] += similarity
+                else:
+                    # Word was excluded - contributes to difference
+                    # Measure the "cost" of removing this word
+                    word_importances[j] -= (1 - similarity)
+
+        # Normalize by number of samples each word appeared in
+        for j in range(n_words):
+            if word_counts[j] > 0:
+                word_importances[j] /= word_counts[j]
+
+        # Scale values to make them more interpretable
+        max_abs = np.max(np.abs(word_importances)) if np.max(np.abs(word_importances)) > 0 else 1
+        word_importances = word_importances / max_abs
+
+        # Create DataFrame with words and their importances
+        df = pd.DataFrame({
+            'word': words,
+            'importance': word_importances,
+            'abs_importance': np.abs(word_importances)
+        })
+
+        # Sort by absolute importance for easier inspection
+        df = df.sort_values('abs_importance', ascending=False)
+
+        return df, full_summary, words
+
+def visualize_word_importances(df, text, summary, output_file="shap_explanations/shap_word_importance.png"):
+    """
+    Create a visualization of word importances
+
+    Args:
+        df: DataFrame with word importances
+        text: Original text
+        summary: Generated summary
+        output_file: Output file path
+    """
+    plt.figure(figsize=(12, 8))
+
+    # Plot top 15 words by importance (or all if fewer than 15)
+    num_words = min(15, len(df))
+    top_words = df.head(num_words)
+
+    # Define colors based on importance
+    colors = ['blue' if x > 0 else 'red' for x in top_words['importance']]
+
+    # Create horizontal bar chart
+    plt.barh(top_words['word'], top_words['importance'], color=colors)
+    plt.title("SHAP Word Importance for Text Summarization", fontsize=14)
+    plt.xlabel("Importance (Blue = Positive Impact, Red = Negative Impact)", fontsize=12)
+    plt.ylabel("Word", fontsize=12)
+    plt.grid(axis='x', linestyle='--', alpha=0.6)
+
+    # Add explanation text
+    plt.figtext(0.5, 0.01,
+               "This visualization shows which words most influence the model's summary generation.\n" +
+               "Blue bars indicate words that contribute positively to the summary content.\n" +
+               "Red bars indicate words that tend to be excluded or negatively impact the summary.",
+               ha="center", fontsize=10,
+               bbox={"facecolor":"lightgrey", "alpha":0.5, "pad":5})
+
+    # Add original text and summary
+    plt.figtext(0.5, 0.95, "Original Text (truncated):", fontweight='bold', ha='center')
+    plt.figtext(0.5, 0.93, text[:100] + "..." if len(text) > 100 else text, ha='center', fontsize=9)
+
+    plt.figtext(0.5, 0.90, "Generated Summary:", fontweight='bold', ha='center')
+    plt.figtext(0.5, 0.88, summary, ha='center', fontsize=9, wrap=True)
+
+    plt.tight_layout(rect=[0, 0.08, 1, 0.85])
+
+    # Make sure the directory exists
+    os.makedirs(os.path.dirname(output_file) if os.path.dirname(output_file) else '.', exist_ok=True)
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    print(f"Visualization saved as '{output_file}'")
+
+    return plt
+
+def create_html_visualization(df, text, summary, output_file="shap_explanations/shap_explanation.html"):
+    """
+    Create an interactive HTML visualization of word importances
+
+    Args:
+        df: DataFrame with word importances
+        text: Original text
+        summary: Generated summary
+        output_file: Output file path
+    """
+    print("Creating HTML visualization...")
+
+    # Create a dictionary mapping words to their normalized importance
+    word_importances = dict(zip(df['word'], df['importance']))
+
+    # Function to generate color based on importance
+    def get_color_style(importance):
+        if importance > 0:
+            # Positive importance - blue
+            opacity = min(abs(importance), 1.0)
+            return f'background-color: rgba(65, 105, 225, {opacity:.2f});'
+        else:
+            # Negative importance - red
+            opacity = min(abs(importance), 1.0)
+            return f'background-color: rgba(220, 20, 60, {opacity:.2f});'
+
+    # Create HTML content
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>SHAP Explanation for Text Summarization</title>
+        <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background-color: #f9f9f9; color: #333; }
+            .container { max-width: 900px; margin: 0 auto; background-color: white; padding: 25px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            .header { background-color: #4285f4; color: white; padding: 15px; margin: -25px -25px 20px; border-radius: 8px 8px 0 0; }
+            h1 { margin: 0; font-weight: 400; }
+            .text-box { margin: 25px 0; padding: 20px; background-color: #f8f9fa; border-radius: 6px; line-height: 1.6; }
+            .summary-box { margin: 25px 0; padding: 20px; background-color: #e8f0fe; border-radius: 6px; }
+            .word { display: inline-block; padding: 2px 4px; margin: 0 1px; border-radius: 3px; }
+            .importance-table { width: 100%; border-collapse: collapse; margin-top: 25px; }
+            .importance-table th, .importance-table td { border: 1px solid #eee; padding: 12px; text-align: left; }
+            .importance-table th { background-color: #f2f2f2; }
+            .importance-table tr:hover { background-color: #f5f5f5; }
+            .explanation { margin-top: 30px; padding: 15px; background-color: #f9f9f9; border-radius: 6px; }
+            .explanation h3 { margin-top: 0; color: #4285f4; }
+            .footer { margin-top: 25px; text-align: center; font-size: 0.9em; color: #666; }
+            .color-scale { display: flex; justify-content: center; margin: 15px 0; }
+            .scale-item { width: 40px; height: 20px; margin: 0 2px; }
+            .positive { background: linear-gradient(to right, rgba(65, 105, 225, 0.1), rgba(65, 105, 225, 1)); }
+            .negative { background: linear-gradient(to right, rgba(220, 20, 60, 0.1), rgba(220, 20, 60, 1)); }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>SHAP Explanation for Text Summarization</h1>
+            </div>
+
+            <div class="text-box">
+                <h2>Original Text with Word Importance:</h2>
+    """
+
+    # Tokenize text and add spans with coloring based on importance
+    words = nltk.word_tokenize(text)
+    for word in words:
+        if word in word_importances:
+            importance = word_importances[word]
+            style = get_color_style(importance)
+            html_content += f'<span class="word" style="{style}">{word}</span> '
+        else:
+            # Word not in importance dict - no highlighting
+            html_content += f'{word} '
+
+    html_content += """
+            </div>
+
+            <div class="summary-box">
+                <h2>Generated Summary:</h2>
+                <p>""" + summary + """</p>
+            </div>
+
+            <h2>Color Scale:</h2>
+            <div class="color-scale">
+                <div style="text-align: center; margin-right: 10px;">
+                    <div class="scale-item negative"></div>
+                    <div>Negative Impact</div>
+                </div>
+                <div style="text-align: center; margin-left: 10px;">
+                    <div class="scale-item positive"></div>
+                    <div>Positive Impact</div>
+                </div>
+            </div>
+
+            <h2>Top Words by Importance:</h2>
+            <table class="importance-table">
+                <tr>
+                    <th>Word</th>
+                    <th>Importance</th>
+                </tr>
+    """
+
+    # Add top 15 words by absolute importance (or all if fewer than 15)
+    num_words = min(15, len(df))
+    top_words = df.head(num_words)
+    for _, row in top_words.iterrows():
+        word = row['word']
+        importance = row['importance']
+        style = get_color_style(importance)
+        sign = "+" if importance > 0 else ""  # Add + for positive values for clarity
+        html_content += f"""
+                <tr>
+                    <td><span style="{style} padding: 2px 6px; border-radius: 3px;">{word}</span></td>
+                    <td>{sign}{importance:.4f}</td>
+                </tr>
+        """
+
+    html_content += """
+            </table>
+
+            <div class="explanation">
+                <h3>How to Interpret This Visualization:</h3>
+                <ul>
+                    <li><strong>Blue highlighting</strong>: Words that positively influence the summary (likely to be included)</li>
+                    <li><strong>Red highlighting</strong>: Words that negatively influence the summary (likely to be excluded)</li>
+                    <li><strong>Color intensity</strong>: Stronger colors indicate higher importance</li>
+                </ul>
+                <p>This explanation uses a SHAP-like approach to show how each word contributes to the model's summarization decisions. Words with high positive importance are likely key concepts that the model focuses on when creating the summary.</p>
+            </div>
+
+            <div class="footer">
+                <p>Generated using EnhancedSHAPExplainer for text summarization models</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+    # Write to file
+    os.makedirs(os.path.dirname(output_file) if os.path.dirname(output_file) else '.', exist_ok=True)
+    with open(output_file, 'w') as f:
+        f.write(html_content)
+
+    print(f"HTML visualization saved as '{output_file}'")
+
+def analyze_with_shap(text, num_samples=50):
+    """Run a complete SHAP analysis for a single text"""
+    print("Loading T5 model...")
+    model, tokenizer, device = load_t5_model()
+
+    # Create SHAP explainer
+    explainer = EnhancedSHAPExplainer(model, tokenizer, device)
+
+    print("\nRunning SHAP analysis...")
+    df, summary, words = explainer.explain(
+        text=text,
+        num_samples=num_samples
+    )
+
+    if df is not None:
+        # Create visualizations
+        print("\nCreating visualizations...")
+        plt = visualize_word_importances(
+            df=df,
+            text=text,
+            summary=summary,
+            output_file="shap_explanations/example_analysis.png"
+        )
+        plt.show()  # Display in notebook
+
+        create_html_visualization(
+            df=df,
+            text=text,
+            summary=summary,
+            output_file="shap_explanations/example_analysis.html"
+        )
+
+        # Display the top words
+        print("\nTop 10 most important words for summarization:")
+        print(df.head(10))
+
+    print("\nSHAP analysis complete!")
+    return df, summary, words
+
+# Sample text to analyze
+sample_text = """
+Correlation filters (CFs) have been continuously advancing the state-of-the-art tracking performance
+and have been extensively studied in the recent few years. Most of the existing CF trackers adopt a
+cosine window to spatially reweight base image to alleviate boundary discontinuity.
+"""
+
+# Run the analysis
+df, summary, words = analyze_with_shap(sample_text, num_samples=50)
+
+# Then, I use the Streamlit is the Python web application used in the final stage to create data-driven or interactive applications
